@@ -42,6 +42,6 @@ public class Main {
         System.err.println("Logs from your program will appear here!");
 
         // TODO: Uncomment the line below to pass the first stage
-        // System.out.print(response.choices().get(0).message().content().orElse(""));
+        System.out.print(response.choices().get(0).message().content().orElse(""));
     }
 }
