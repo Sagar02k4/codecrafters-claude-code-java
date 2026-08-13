@@ -1,6 +1,10 @@
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.openai.client.OpenAIClient;
 import com.openai.client.okhttp.OpenAIOkHttpClient;
 import com.openai.core.JsonValue;
@@ -8,10 +12,11 @@ import com.openai.models.FunctionDefinition;
 import com.openai.models.FunctionParameters;
 import com.openai.models.chat.completions.ChatCompletion;
 import com.openai.models.chat.completions.ChatCompletionCreateParams;
+import com.openai.models.chat.completions.ChatCompletionMessageToolCall;
 import com.openai.models.chat.completions.ChatCompletionTool;
 
 public class Main {
-    public static void main(String[] args) {
+    public static void main(String[] args) throws Exception {
         if (args.length < 2 || !"-p".equals(args[0])) {
             System.err.println("Usage: program -p <prompt>");
             System.exit(1);
@@ -71,6 +76,27 @@ public class Main {
         }
 
         System.err.println("Logs from your program will appear here!");
-        System.out.print(response.choices().get(0).message().content().orElse(""));
+
+        // ---- Handle tool calls ----
+        var message = response.choices().get(0).message();
+
+        List<ChatCompletionMessageToolCall> toolCalls = message.toolCalls().orElse(List.of());
+
+        if (!toolCalls.isEmpty()) {
+            ChatCompletionMessageToolCall toolCall = toolCalls.get(0);
+            String functionName = toolCall.function().name();
+            String argumentsJson = toolCall.function().arguments();
+
+            if ("Read".equals(functionName)) {
+                ObjectMapper mapper = new ObjectMapper();
+                JsonNode argsNode = mapper.readTree(argumentsJson);
+                String filePath = argsNode.get("file_path").asText();
+
+                String fileContents = Files.readString(Path.of(filePath));
+                System.out.print(fileContents);
+            }
+        } else {
+            System.out.print(message.content().orElse(""));
+        }
     }
 }
