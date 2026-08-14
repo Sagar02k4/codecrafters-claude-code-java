@@ -1,3 +1,5 @@
+import java.io.BufferedReader;
+import java.io.InputStreamReader;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
@@ -44,52 +46,60 @@ public class Main {
         FunctionParameters readParameters = FunctionParameters.builder()
                 .putAdditionalProperty("type", JsonValue.from("object"))
                 .putAdditionalProperty("properties", JsonValue.from(
-                        Map.of(
-                                "file_path", Map.of(
-                                        "type", "string",
-                                        "description", "The path to the file to read"
-                                )
-                        )
+                        Map.of("file_path", Map.of(
+                                "type", "string",
+                                "description", "The path to the file to read"
+                        ))
                 ))
                 .putAdditionalProperty("required", JsonValue.from(List.of("file_path")))
                 .build();
 
-        FunctionDefinition readFunction = FunctionDefinition.builder()
-                .name("Read")
-                .description("Read and return the contents of a file")
-                .parameters(readParameters)
-                .build();
-
         ChatCompletionTool readTool = ChatCompletionTool.builder()
-                .function(readFunction)
+                .function(FunctionDefinition.builder()
+                        .name("Read")
+                        .description("Read and return the contents of a file")
+                        .parameters(readParameters)
+                        .build())
                 .build();
 
-        // ---- Write tool (naya) ----
+        // ---- Write tool ----
         FunctionParameters writeParameters = FunctionParameters.builder()
                 .putAdditionalProperty("type", JsonValue.from("object"))
                 .putAdditionalProperty("properties", JsonValue.from(
                         Map.of(
-                                "file_path", Map.of(
-                                        "type", "string",
-                                        "description", "The path of the file to write to"
-                                ),
-                                "content", Map.of(
-                                        "type", "string",
-                                        "description", "The content to write to the file"
-                                )
+                                "file_path", Map.of("type", "string", "description", "The path of the file to write to"),
+                                "content", Map.of("type", "string", "description", "The content to write to the file")
                         )
                 ))
                 .putAdditionalProperty("required", JsonValue.from(List.of("file_path", "content")))
                 .build();
 
-        FunctionDefinition writeFunction = FunctionDefinition.builder()
-                .name("Write")
-                .description("Write content to a file")
-                .parameters(writeParameters)
+        ChatCompletionTool writeTool = ChatCompletionTool.builder()
+                .function(FunctionDefinition.builder()
+                        .name("Write")
+                        .description("Write content to a file")
+                        .parameters(writeParameters)
+                        .build())
                 .build();
 
-        ChatCompletionTool writeTool = ChatCompletionTool.builder()
-                .function(writeFunction)
+        // ---- Bash tool ----
+        FunctionParameters bashParameters = FunctionParameters.builder()
+                .putAdditionalProperty("type", JsonValue.from("object"))
+                .putAdditionalProperty("properties", JsonValue.from(
+                        Map.of("command", Map.of(
+                                "type", "string",
+                                "description", "The command to execute"
+                        ))
+                ))
+                .putAdditionalProperty("required", JsonValue.from(List.of("command")))
+                .build();
+
+        ChatCompletionTool bashTool = ChatCompletionTool.builder()
+                .function(FunctionDefinition.builder()
+                        .name("Bash")
+                        .description("Execute a shell command")
+                        .parameters(bashParameters)
+                        .build())
                 .build();
 
         ObjectMapper mapper = new ObjectMapper();
@@ -99,12 +109,12 @@ public class Main {
                 .model("anthropic/claude-haiku-4.5")
                 .addTool(readTool)
                 .addTool(writeTool)
+                .addTool(bashTool)
                 .addUserMessage(prompt);
 
         // ---- Agent loop ----
         while (true) {
-            ChatCompletionCreateParams request = requestBuilder.build();
-            ChatCompletion response = client.chat().completions().create(request);
+            ChatCompletion response = client.chat().completions().create(requestBuilder.build());
 
             if (response.choices().isEmpty()) {
                 throw new RuntimeException("no choices in response");
@@ -138,14 +148,16 @@ public class Main {
                     } else if ("Write".equals(functionName)) {
                         String filePath = argsNode.get("file_path").asText();
                         String content = argsNode.get("content").asText();
-
                         Path path = Path.of(filePath);
-                        // agar parent directories exist nahi karti, to bana do
                         if (path.getParent() != null) {
                             Files.createDirectories(path.getParent());
                         }
                         Files.writeString(path, content);
                         result = "File written successfully to " + filePath;
+
+                    } else if ("Bash".equals(functionName)) {
+                        String command = argsNode.get("command").asText();
+                        result = executeBashCommand(command);
 
                     } else {
                         result = "Unknown tool: " + functionName;
@@ -164,5 +176,25 @@ public class Main {
                 );
             }
         }
+    }
+
+    private static String executeBashCommand(String command) throws Exception {
+        ProcessBuilder processBuilder = new ProcessBuilder("sh", "-c", command);
+        processBuilder.directory(Path.of("").toAbsolutePath().toFile()); // current working directory
+        processBuilder.redirectErrorStream(true); // stdout + stderr dono ek saath capture honge
+
+        Process process = processBuilder.start();
+
+        StringBuilder output = new StringBuilder();
+        try (BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream()))) {
+            String line;
+            while ((line = reader.readLine()) != null) {
+                output.append(line).append(System.lineSeparator());
+            }
+        }
+
+        process.waitFor();
+
+        return output.toString();
     }
 }
