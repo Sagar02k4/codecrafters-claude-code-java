@@ -14,6 +14,7 @@ import com.openai.models.chat.completions.ChatCompletion;
 import com.openai.models.chat.completions.ChatCompletionCreateParams;
 import com.openai.models.chat.completions.ChatCompletionMessageToolCall;
 import com.openai.models.chat.completions.ChatCompletionTool;
+import com.openai.models.chat.completions.ChatCompletionToolMessageParam;
 
 public class Main {
     public static void main(String[] args) throws Exception {
@@ -39,7 +40,7 @@ public class Main {
                 .baseUrl(baseUrl)
                 .build();
 
-        // ---- Read tool ----
+        // ---- Read tool define karo ----
         FunctionParameters readParameters = FunctionParameters.builder()
                 .putAdditionalProperty("type", JsonValue.from("object"))
                 .putAdditionalProperty("properties", JsonValue.from(
@@ -63,40 +64,71 @@ public class Main {
                 .function(readFunction)
                 .build();
 
-        ChatCompletion response = client.chat().completions().create(
-                ChatCompletionCreateParams.builder()
-                        .model("anthropic/claude-haiku-4.5")
-                        .addUserMessage(prompt)
-                        .addTool(readTool)
-                        .build()
-        );
+        ObjectMapper mapper = new ObjectMapper();
 
-        if (response.choices().isEmpty()) {
-            throw new RuntimeException("no choices in response");
-        }
+        // ---- Conversation history: yahi hamara "messages" array hai ----
+        ChatCompletionCreateParams.Builder requestBuilder = ChatCompletionCreateParams.builder()
+                .model("anthropic/claude-haiku-4.5")
+                .addTool(readTool)
+                .addUserMessage(prompt);
 
-        System.err.println("Logs from your program will appear here!");
+        // ---- Agent loop shuru ----
+        while (true) {
+            ChatCompletionCreateParams request = requestBuilder.build();
 
-        // ---- Handle tool calls ----
-        var message = response.choices().get(0).message();
+            ChatCompletion response = client.chat().completions().create(request);
 
-        List<ChatCompletionMessageToolCall> toolCalls = message.toolCalls().orElse(List.of());
-
-        if (!toolCalls.isEmpty()) {
-            ChatCompletionMessageToolCall toolCall = toolCalls.get(0);
-            String functionName = toolCall.function().name();
-            String argumentsJson = toolCall.function().arguments();
-
-            if ("Read".equals(functionName)) {
-                ObjectMapper mapper = new ObjectMapper();
-                JsonNode argsNode = mapper.readTree(argumentsJson);
-                String filePath = argsNode.get("file_path").asText();
-
-                String fileContents = Files.readString(Path.of(filePath));
-                System.out.print(fileContents);
+            if (response.choices().isEmpty()) {
+                throw new RuntimeException("no choices in response");
             }
-        } else {
-            System.out.print(message.content().orElse(""));
+
+            var choice = response.choices().get(0);
+            var message = choice.message();
+
+            // Assistant ka response history mein add karo
+            requestBuilder.addMessage(message.toParam());
+
+            List<ChatCompletionMessageToolCall> toolCalls = message.toolCalls().orElse(List.of());
+
+            if (toolCalls.isEmpty()) {
+                // Koi tool call nahi -> final answer mil gaya
+                System.err.println("Final response received, exiting loop.");
+                System.out.print(message.content().orElse(""));
+                break;
+            }
+
+            // Har tool call ko execute karo
+            for (ChatCompletionMessageToolCall toolCall : toolCalls) {
+                String functionName = toolCall.function().name();
+                String argumentsJson = toolCall.function().arguments();
+                String toolCallId = toolCall.id();
+
+                String result;
+
+                if ("Read".equals(functionName)) {
+                    try {
+                        JsonNode argsNode = mapper.readTree(argumentsJson);
+                        String filePath = argsNode.get("file_path").asText();
+                        result = Files.readString(Path.of(filePath));
+                    } catch (Exception e) {
+                        result = "Error reading file: " + e.getMessage();
+                    }
+                } else {
+                    result = "Unknown tool: " + functionName;
+                }
+
+                System.err.println("Executed tool: " + functionName + " -> result length: " + result.length());
+
+                // Tool ka result history mein add karo (role: "tool")
+                requestBuilder.addMessage(
+                        ChatCompletionToolMessageParam.builder()
+                                .toolCallId(toolCallId)
+                                .content(result)
+                                .build()
+                );
+            }
+
+            // loop phir se chalega, is baar naye messages ke saath
         }
     }
 }
