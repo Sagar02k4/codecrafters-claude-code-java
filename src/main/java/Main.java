@@ -40,7 +40,7 @@ public class Main {
                 .baseUrl(baseUrl)
                 .build();
 
-        // ---- Read tool define karo ----
+        // ---- Read tool ----
         FunctionParameters readParameters = FunctionParameters.builder()
                 .putAdditionalProperty("type", JsonValue.from("object"))
                 .putAdditionalProperty("properties", JsonValue.from(
@@ -64,40 +64,63 @@ public class Main {
                 .function(readFunction)
                 .build();
 
+        // ---- Write tool (naya) ----
+        FunctionParameters writeParameters = FunctionParameters.builder()
+                .putAdditionalProperty("type", JsonValue.from("object"))
+                .putAdditionalProperty("properties", JsonValue.from(
+                        Map.of(
+                                "file_path", Map.of(
+                                        "type", "string",
+                                        "description", "The path of the file to write to"
+                                ),
+                                "content", Map.of(
+                                        "type", "string",
+                                        "description", "The content to write to the file"
+                                )
+                        )
+                ))
+                .putAdditionalProperty("required", JsonValue.from(List.of("file_path", "content")))
+                .build();
+
+        FunctionDefinition writeFunction = FunctionDefinition.builder()
+                .name("Write")
+                .description("Write content to a file")
+                .parameters(writeParameters)
+                .build();
+
+        ChatCompletionTool writeTool = ChatCompletionTool.builder()
+                .function(writeFunction)
+                .build();
+
         ObjectMapper mapper = new ObjectMapper();
 
-        // ---- Conversation history: yahi hamara "messages" array hai ----
+        // ---- Conversation history ----
         ChatCompletionCreateParams.Builder requestBuilder = ChatCompletionCreateParams.builder()
                 .model("anthropic/claude-haiku-4.5")
                 .addTool(readTool)
+                .addTool(writeTool)
                 .addUserMessage(prompt);
 
-        // ---- Agent loop shuru ----
+        // ---- Agent loop ----
         while (true) {
             ChatCompletionCreateParams request = requestBuilder.build();
-
             ChatCompletion response = client.chat().completions().create(request);
 
             if (response.choices().isEmpty()) {
                 throw new RuntimeException("no choices in response");
             }
 
-            var choice = response.choices().get(0);
-            var message = choice.message();
-
-            // Assistant ka response history mein add karo
+            var message = response.choices().get(0).message();
             requestBuilder.addMessage(message.toParam());
 
             List<ChatCompletionMessageToolCall> toolCalls = message.toolCalls().orElse(List.of());
 
             if (toolCalls.isEmpty()) {
-                // Koi tool call nahi -> final answer mil gaya
                 System.err.println("Final response received, exiting loop.");
                 System.out.print(message.content().orElse(""));
                 break;
             }
 
-            // Har tool call ko execute karo
             for (ChatCompletionMessageToolCall toolCall : toolCalls) {
                 String functionName = toolCall.function().name();
                 String argumentsJson = toolCall.function().arguments();
@@ -105,21 +128,34 @@ public class Main {
 
                 String result;
 
-                if ("Read".equals(functionName)) {
-                    try {
-                        JsonNode argsNode = mapper.readTree(argumentsJson);
+                try {
+                    JsonNode argsNode = mapper.readTree(argumentsJson);
+
+                    if ("Read".equals(functionName)) {
                         String filePath = argsNode.get("file_path").asText();
                         result = Files.readString(Path.of(filePath));
-                    } catch (Exception e) {
-                        result = "Error reading file: " + e.getMessage();
+
+                    } else if ("Write".equals(functionName)) {
+                        String filePath = argsNode.get("file_path").asText();
+                        String content = argsNode.get("content").asText();
+
+                        Path path = Path.of(filePath);
+                        // agar parent directories exist nahi karti, to bana do
+                        if (path.getParent() != null) {
+                            Files.createDirectories(path.getParent());
+                        }
+                        Files.writeString(path, content);
+                        result = "File written successfully to " + filePath;
+
+                    } else {
+                        result = "Unknown tool: " + functionName;
                     }
-                } else {
-                    result = "Unknown tool: " + functionName;
+                } catch (Exception e) {
+                    result = "Error executing tool: " + e.getMessage();
                 }
 
-                System.err.println("Executed tool: " + functionName + " -> result length: " + result.length());
+                System.err.println("Executed tool: " + functionName);
 
-                // Tool ka result history mein add karo (role: "tool")
                 requestBuilder.addMessage(
                         ChatCompletionToolMessageParam.builder()
                                 .toolCallId(toolCallId)
@@ -127,8 +163,6 @@ public class Main {
                                 .build()
                 );
             }
-
-            // loop phir se chalega, is baar naye messages ke saath
         }
     }
 }
