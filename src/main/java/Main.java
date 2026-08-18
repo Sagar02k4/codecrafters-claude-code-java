@@ -4,6 +4,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
+import java.util.Scanner;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -19,169 +20,171 @@ import com.openai.models.chat.completions.ChatCompletionTool;
 import com.openai.models.chat.completions.ChatCompletionToolMessageParam;
 
 public class Main {
+
+    static OpenAIClient client;
+    static ObjectMapper mapper = new ObjectMapper();
+
     public static void main(String[] args) throws Exception {
-        if (args.length < 2 || !"-p".equals(args[0])) {
-            System.err.println("Usage: program -p <prompt>");
-            System.exit(1);
-        }
-
-        String prompt = args[1];
-
         String apiKey = System.getenv("OPENROUTER_API_KEY");
         String baseUrl = System.getenv("OPENROUTER_BASE_URL");
         if (baseUrl == null || baseUrl.isEmpty()) {
             baseUrl = "https://openrouter.ai/api/v1";
         }
-
         if (apiKey == null || apiKey.isEmpty()) {
             throw new RuntimeException("OPENROUTER_API_KEY is not set");
         }
 
-        OpenAIClient client = OpenAIOkHttpClient.builder()
+        client = OpenAIOkHttpClient.builder()
                 .apiKey(apiKey)
                 .baseUrl(baseUrl)
                 .build();
 
-        // ---- Read tool ----
-        FunctionParameters readParameters = FunctionParameters.builder()
-                .putAdditionalProperty("type", JsonValue.from("object"))
-                .putAdditionalProperty("properties", JsonValue.from(
-                        Map.of("file_path", Map.of(
-                                "type", "string",
-                                "description", "The path to the file to read"
-                        ))
-                ))
-                .putAdditionalProperty("required", JsonValue.from(List.of("file_path")))
-                .build();
+        List<ChatCompletionTool> tools = buildTools();
 
-        ChatCompletionTool readTool = ChatCompletionTool.builder()
-                .function(FunctionDefinition.builder()
-                        .name("Read")
-                        .description("Read and return the contents of a file")
-                        .parameters(readParameters)
-                        .build())
-                .build();
+        // ---- Agar -p flag diya hai, to single-shot mode ----
+        if (args.length >= 2 && "-p".equals(args[0])) {
+            String prompt = args[1];
+            ChatCompletionCreateParams.Builder requestBuilder = ChatCompletionCreateParams.builder()
+                    .model("nemotron-3-ultra-550b-a55b:free");
+            for (ChatCompletionTool tool : tools) requestBuilder.addTool(tool);
+            requestBuilder.addUserMessage(prompt);
 
-        // ---- Write tool ----
-        FunctionParameters writeParameters = FunctionParameters.builder()
-                .putAdditionalProperty("type", JsonValue.from("object"))
-                .putAdditionalProperty("properties", JsonValue.from(
-                        Map.of(
-                                "file_path", Map.of("type", "string", "description", "The path of the file to write to"),
-                                "content", Map.of("type", "string", "description", "The content to write to the file")
-                        )
-                ))
-                .putAdditionalProperty("required", JsonValue.from(List.of("file_path", "content")))
-                .build();
+            String finalAnswer = runAgentLoop(requestBuilder);
+            System.out.print(finalAnswer);
+            return;
+        }
 
-        ChatCompletionTool writeTool = ChatCompletionTool.builder()
-                .function(FunctionDefinition.builder()
-                        .name("Write")
-                        .description("Write content to a file")
-                        .parameters(writeParameters)
-                        .build())
-                .build();
+        // ---- Nahi to interactive chat mode ----
+        System.err.println("Entering chat mode. Type 'exit' or 'quit' to stop.");
+        Scanner scanner = new Scanner(System.in);
 
-        // ---- Bash tool ----
-        FunctionParameters bashParameters = FunctionParameters.builder()
-                .putAdditionalProperty("type", JsonValue.from("object"))
-                .putAdditionalProperty("properties", JsonValue.from(
-                        Map.of("command", Map.of(
-                                "type", "string",
-                                "description", "The command to execute"
-                        ))
-                ))
-                .putAdditionalProperty("required", JsonValue.from(List.of("command")))
-                .build();
-
-        ChatCompletionTool bashTool = ChatCompletionTool.builder()
-                .function(FunctionDefinition.builder()
-                        .name("Bash")
-                        .description("Execute a shell command")
-                        .parameters(bashParameters)
-                        .build())
-                .build();
-
-        ObjectMapper mapper = new ObjectMapper();
-
-        // ---- Conversation history ----
         ChatCompletionCreateParams.Builder requestBuilder = ChatCompletionCreateParams.builder()
-                .model("anthropic/claude-haiku-4.5")
-                .addTool(readTool)
-                .addTool(writeTool)
-                .addTool(bashTool)
-                .addUserMessage(prompt);
+                .model("nemotron-3-ultra-550b-a55b:free");
+        for (ChatCompletionTool tool : tools) requestBuilder.addTool(tool);
 
-        // ---- Agent loop ----
         while (true) {
-            ChatCompletion response = client.chat().completions().create(requestBuilder.build());
+            System.out.print("> ");
+            if (!scanner.hasNextLine()) break;
+            String userInput = scanner.nextLine();
 
-            if (response.choices().isEmpty()) {
-                throw new RuntimeException("no choices in response");
-            }
-
-            var message = response.choices().get(0).message();
-            requestBuilder.addMessage(message.toParam());
-
-            List<ChatCompletionMessageToolCall> toolCalls = message.toolCalls().orElse(List.of());
-
-            if (toolCalls.isEmpty()) {
-                System.err.println("Final response received, exiting loop.");
-                System.out.print(message.content().orElse(""));
+            if (userInput.equalsIgnoreCase("exit") || userInput.equalsIgnoreCase("quit")) {
+                System.err.println("Exiting chat.");
                 break;
             }
+            if (userInput.isBlank()) continue;
 
-            for (ChatCompletionMessageToolCall toolCall : toolCalls) {
-                String functionName = toolCall.function().name();
-                String argumentsJson = toolCall.function().arguments();
-                String toolCallId = toolCall.id();
+            requestBuilder.addUserMessage(userInput);
 
-                String result;
+            String finalAnswer = runAgentLoop(requestBuilder);
+            System.out.println(finalAnswer);
+        }
 
-                try {
-                    JsonNode argsNode = mapper.readTree(argumentsJson);
+        scanner.close();
+    }
 
-                    if ("Read".equals(functionName)) {
-                        String filePath = argsNode.get("file_path").asText();
-                        result = Files.readString(Path.of(filePath));
+    // ---- Agent loop: ek user message ke baad jab tak tool calls khatam na ho jaayein ----
+    private static String runAgentLoop(ChatCompletionCreateParams.Builder requestBuilder) throws Exception {
+    int maxIterations = 15;
+    int iterations = 0;
 
-                    } else if ("Write".equals(functionName)) {
-                        String filePath = argsNode.get("file_path").asText();
-                        String content = argsNode.get("content").asText();
-                        Path path = Path.of(filePath);
-                        if (path.getParent() != null) {
-                            Files.createDirectories(path.getParent());
-                        }
-                        Files.writeString(path, content);
-                        result = "File written successfully to " + filePath;
+    while (true) {
+        iterations++;
+        if (iterations > maxIterations) {
+            return "Error: exceeded max iterations without a final answer.";
+        }
 
-                    } else if ("Bash".equals(functionName)) {
-                        String command = argsNode.get("command").asText();
-                        result = executeBashCommand(command);
+        ChatCompletion response = client.chat().completions().create(requestBuilder.build());
 
-                    } else {
-                        result = "Unknown tool: " + functionName;
-                    }
-                } catch (Exception e) {
-                    result = "Error executing tool: " + e.getMessage();
+        if (response.choices().isEmpty()) {
+            throw new RuntimeException("no choices in response");
+        }
+
+        var message = response.choices().get(0).message();
+        requestBuilder.addMessage(message.toParam());
+
+        List<ChatCompletionMessageToolCall> toolCalls = message.toolCalls().orElse(List.of());
+
+        if (toolCalls.isEmpty()) {
+            return message.content().orElse("");
+        }
+
+        for (ChatCompletionMessageToolCall toolCall : toolCalls) {
+            String functionName = toolCall.function().name();
+            String argumentsJson = toolCall.function().arguments();
+            String toolCallId = toolCall.id();
+
+            String result = executeTool(functionName, argumentsJson);
+            System.err.println("Executed tool: " + functionName + " args=" + argumentsJson + " -> " + result.substring(0, Math.min(100, result.length())));
+
+            requestBuilder.addMessage(
+                    ChatCompletionToolMessageParam.builder()
+                            .toolCallId(toolCallId)
+                            .content(result)
+                            .build()
+            );
+        }
+    }
+}
+
+    // ---- Tool execution ----
+    private static String executeTool(String functionName, String argumentsJson) {
+        try {
+            JsonNode argsNode = mapper.readTree(argumentsJson);
+
+            switch (functionName) {
+                case "Read": {
+                    String filePath = argsNode.get("file_path").asText();
+                    return Files.readString(Path.of(filePath));
                 }
+                case "Write": {
+                    String filePath = argsNode.get("file_path").asText();
+                    String content = argsNode.get("content").asText();
+                    Path path = Path.of(filePath);
+                    if (path.getParent() != null) {
+                        Files.createDirectories(path.getParent());
+                    }
+                    Files.writeString(path, content);
+                    return "File written successfully to " + filePath;
+                }
+                case "Edit": {
+                    String filePath = argsNode.get("file_path").asText();
+                    String oldString = argsNode.get("old_string").asText();
+                    String newString = argsNode.get("new_string").asText();
 
-                System.err.println("Executed tool: " + functionName);
+                    String fileContent = Files.readString(Path.of(filePath));
 
-                requestBuilder.addMessage(
-                        ChatCompletionToolMessageParam.builder()
-                                .toolCallId(toolCallId)
-                                .content(result)
-                                .build()
-                );
+                    int firstIndex = fileContent.indexOf(oldString);
+                    if (firstIndex == -1) {
+                        return "Error: old_string not found in file " + filePath;
+                    }
+                    int lastIndex = fileContent.lastIndexOf(oldString);
+                    if (firstIndex != lastIndex) {
+                        return "Error: old_string appears multiple times in file, must be unique";
+                    }
+
+                    String updatedContent = fileContent.substring(0, firstIndex)
+                            + newString
+                            + fileContent.substring(firstIndex + oldString.length());
+
+                    Files.writeString(Path.of(filePath), updatedContent);
+                    return "File edited successfully: " + filePath;
+                }
+                case "Bash": {
+                    String command = argsNode.get("command").asText();
+                    return executeBashCommand(command);
+                }
+                default:
+                    return "Unknown tool: " + functionName;
             }
+        } catch (Exception e) {
+            return "Error executing tool: " + e.getMessage();
         }
     }
 
     private static String executeBashCommand(String command) throws Exception {
         ProcessBuilder processBuilder = new ProcessBuilder("sh", "-c", command);
-        processBuilder.directory(Path.of("").toAbsolutePath().toFile()); // current working directory
-        processBuilder.redirectErrorStream(true); // stdout + stderr dono ek saath capture honge
+        processBuilder.directory(Path.of("").toAbsolutePath().toFile());
+        processBuilder.redirectErrorStream(true);
 
         Process process = processBuilder.start();
 
@@ -194,7 +197,80 @@ public class Main {
         }
 
         process.waitFor();
-
         return output.toString();
+    }
+
+    // ---- Tool definitions ----
+    private static List<ChatCompletionTool> buildTools() {
+        ChatCompletionTool readTool = ChatCompletionTool.builder()
+                .function(FunctionDefinition.builder()
+                        .name("Read")
+                        .description("Read and return the contents of a file")
+                        .parameters(FunctionParameters.builder()
+                                .putAdditionalProperty("type", JsonValue.from("object"))
+                                .putAdditionalProperty("properties", JsonValue.from(
+                                        Map.of("file_path", Map.of(
+                                                "type", "string",
+                                                "description", "The path to the file to read"
+                                        ))
+                                ))
+                                .putAdditionalProperty("required", JsonValue.from(List.of("file_path")))
+                                .build())
+                        .build())
+                .build();
+
+        ChatCompletionTool writeTool = ChatCompletionTool.builder()
+                .function(FunctionDefinition.builder()
+                        .name("Write")
+                        .description("Write content to a file")
+                        .parameters(FunctionParameters.builder()
+                                .putAdditionalProperty("type", JsonValue.from("object"))
+                                .putAdditionalProperty("properties", JsonValue.from(
+                                        Map.of(
+                                                "file_path", Map.of("type", "string", "description", "The path of the file to write to"),
+                                                "content", Map.of("type", "string", "description", "The content to write to the file")
+                                        )
+                                ))
+                                .putAdditionalProperty("required", JsonValue.from(List.of("file_path", "content")))
+                                .build())
+                        .build())
+                .build();
+
+        ChatCompletionTool editTool = ChatCompletionTool.builder()
+                .function(FunctionDefinition.builder()
+                        .name("Edit")
+                        .description("Replace an exact, unique occurrence of text within a file. Use this instead of Write when you only need to change part of a file.")
+                        .parameters(FunctionParameters.builder()
+                                .putAdditionalProperty("type", JsonValue.from("object"))
+                                .putAdditionalProperty("properties", JsonValue.from(
+                                        Map.of(
+                                                "file_path", Map.of("type", "string", "description", "The path of the file to edit"),
+                                                "old_string", Map.of("type", "string", "description", "The exact text to find and replace (must be unique in the file)"),
+                                                "new_string", Map.of("type", "string", "description", "The text to replace it with")
+                                        )
+                                ))
+                                .putAdditionalProperty("required", JsonValue.from(List.of("file_path", "old_string", "new_string")))
+                                .build())
+                        .build())
+                .build();
+
+        ChatCompletionTool bashTool = ChatCompletionTool.builder()
+                .function(FunctionDefinition.builder()
+                        .name("Bash")
+                        .description("Execute a shell command")
+                        .parameters(FunctionParameters.builder()
+                                .putAdditionalProperty("type", JsonValue.from("object"))
+                                .putAdditionalProperty("properties", JsonValue.from(
+                                        Map.of("command", Map.of(
+                                                "type", "string",
+                                                "description", "The command to execute"
+                                        ))
+                                ))
+                                .putAdditionalProperty("required", JsonValue.from(List.of("command")))
+                                .build())
+                        .build())
+                .build();
+
+        return List.of(readTool, writeTool, editTool, bashTool);
     }
 }
