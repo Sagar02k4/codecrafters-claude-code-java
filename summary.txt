@@ -1,1 +1,1 @@
-Fixed pom.xml to use Java 17 instead of Java 26 and removed --enable-preview flag to resolve build failure on CodeCrafters platform.
+This is a starting point for a Java implementation of the "Build Your Own Claude Code" challenge from CodeCrafters, where you build an LLM-powered coding assistant with tool calling capabilities.

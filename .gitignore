@@ -1,3 +1,9 @@
 *.jar
 target/
 .idea/
+.vscode/
+test.txt
+summary.txt
+test_summary.txt
+codecrafters.yml
+.codecrafters/

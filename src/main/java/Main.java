@@ -45,7 +45,8 @@ public class Main {
         if (args.length >= 2 && "-p".equals(args[0])) {
             String prompt = args[1];
             ChatCompletionCreateParams.Builder requestBuilder = ChatCompletionCreateParams.builder()
-                    .model("nemotron-3-ultra-550b-a55b:free");
+                    .model("nvidia/nemotron-3-ultra-550b-a55b:free")
+                    .addSystemMessage("STRICT RULE: Call Read exactly ONCE for the requested file, then STOP calling tools and respond with the file's content as plain text. Do NOT read any other file. Do NOT explore the codebase. Violating this rule is not allowed.");
             for (ChatCompletionTool tool : tools) requestBuilder.addTool(tool);
             requestBuilder.addUserMessage(prompt);
 
@@ -59,7 +60,9 @@ public class Main {
         Scanner scanner = new Scanner(System.in);
 
         ChatCompletionCreateParams.Builder requestBuilder = ChatCompletionCreateParams.builder()
-                .model("nemotron-3-ultra-550b-a55b:free");
+                .model("nvidia/nemotron-3-ultra-550b-a55b:free")
+                .addSystemMessage("STRICT RULE: Call Read exactly ONCE for the requested file, then STOP calling tools and respond with the file's content as plain text. Do NOT read any other file. Do NOT explore the codebase. Violating this rule is not allowed.");
+
         for (ChatCompletionTool tool : tools) requestBuilder.addTool(tool);
 
         while (true) {
@@ -84,7 +87,7 @@ public class Main {
 
     // ---- Agent loop: ek user message ke baad jab tak tool calls khatam na ho jaayein ----
     private static String runAgentLoop(ChatCompletionCreateParams.Builder requestBuilder) throws Exception {
-    int maxIterations = 15;
+    int maxIterations = 8;
     int iterations = 0;
 
     while (true) {
